@@ -456,8 +456,8 @@ detect_cisd() =>
                 cisd_range_high := high[1]
                 cisd_range_low  := low[1]
             else
-                cisd_range_high := f_min(cisd_range_high, high[1])
-                cisd_range_low  := f_max(cisd_range_low,  low[1])
+                cisd_range_high := f_max(cisd_range_high, high[1])
+                cisd_range_low  := f_min(cisd_range_low,  low[1])
         else
             // Check for breakout after at least 2 inside bars
             if cisd_consec_inside >= 2 and not na(cisd_range_high)
