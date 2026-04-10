@@ -316,9 +316,9 @@ if i_liq_show
             if array.size(eqh_lines) > 20
                 line.delete(array.shift(eqh_lines))
 
-            // Sweep: price spiked above EQH but closed back below it
+            // Sweep: price spiked above EQH (buy-side liquidity) but closed back below it
             if i_liq_sweep_show and high > ph_price and close < ph_price
-                label.new(bar_index, high, text="SSL Sweep",
+                label.new(bar_index, high, text="BSL Sweep",
                           style=label.style_label_down,
                           color=i_liq_sweep_col, textcolor=color.white, size=size.small)
 
@@ -338,9 +338,9 @@ if i_liq_show
             if array.size(eql_lines) > 20
                 line.delete(array.shift(eql_lines))
 
-            // Sweep: price spiked below EQL but closed back above it
+            // Sweep: price spiked below EQL (sell-side liquidity) but closed back above it
             if i_liq_sweep_show and low < pl_price and close > pl_price
-                label.new(bar_index, low, text="BSL Sweep",
+                label.new(bar_index, low, text="SSL Sweep",
                           style=label.style_label_up,
                           color=i_liq_sweep_col, textcolor=color.white, size=size.small)
 
