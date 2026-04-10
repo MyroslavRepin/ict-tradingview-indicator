@@ -1,0 +1,535 @@
+// =============================================================================
+// ICT (Inner Circle Trader) Concepts Indicator
+// Pine Script v5
+//
+// Features:
+//   - PD Arrays: Order Blocks, Breaker Blocks, Mitigation Blocks
+//   - Liquidity: Equal Highs/Lows, Buy/Sell-side, Sweeps
+//   - Market Structure: MSS, ChoCH
+//   - CISD: Change in State of Delivery
+//   - Imbalances: Fair Value Gaps (FVG), Inversion FVG (IFVG)
+//   - Dashboard: Market Bias panel (top-right)
+//
+// Pine Script v5 rules observed:
+//   - Global var scalars (int/float/bool) are NEVER modified inside functions.
+//     All stateful logic runs inline in the main script body.
+//   - Plot functions (bgcolor) are called in the main body only.
+//   - Pure helper functions (read-only, return a value) are used freely.
+// =============================================================================
+
+//@version=5
+indicator("ICT Concepts [All-in-One]", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// =============================================================================
+// ─── INPUT GROUPS ────────────────────────────────────────────────────────────
+// =============================================================================
+
+var string GRP_OB   = "PD Arrays — Order Blocks"
+var string GRP_BB   = "PD Arrays — Breaker Blocks"
+var string GRP_MB   = "PD Arrays — Mitigation Blocks"
+var string GRP_LIQ  = "Liquidity"
+var string GRP_MS   = "Market Structure"
+var string GRP_CISD = "CISD"
+var string GRP_FVG  = "Imbalances — FVG / IFVG"
+var string GRP_DASH = "Dashboard"
+
+// Order Blocks
+i_ob_show       = input.bool(true,  "Show Order Blocks",         group=GRP_OB)
+i_ob_bull_col   = input.color(color.new(#4CAF50, 75), "Bullish OB Color",  group=GRP_OB)
+i_ob_bear_col   = input.color(color.new(#F44336, 75), "Bearish OB Color",  group=GRP_OB)
+i_ob_border_col = input.color(color.new(#888888, 60), "Border Color",      group=GRP_OB)
+i_ob_extend     = input.int(20, "Extend Bars (0 = off)", minval=0, maxval=200, group=GRP_OB)
+i_ob_lookback   = input.int(10, "Swing Lookback",        minval=3, maxval=50,  group=GRP_OB)
+
+// Breaker Blocks
+i_bb_show     = input.bool(true,  "Show Breaker Blocks",       group=GRP_BB)
+i_bb_bull_col = input.color(color.new(#00BCD4, 75), "Bullish BB Color",  group=GRP_BB)
+i_bb_bear_col = input.color(color.new(#FF9800, 75), "Bearish BB Color",  group=GRP_BB)
+
+// Mitigation Blocks
+i_mb_show     = input.bool(true,  "Show Mitigation Blocks",    group=GRP_MB)
+i_mb_bull_col = input.color(color.new(#8BC34A, 78), "Bullish MB Color",  group=GRP_MB)
+i_mb_bear_col = input.color(color.new(#FF5722, 78), "Bearish MB Color",  group=GRP_MB)
+
+// Liquidity
+i_liq_show       = input.bool(true,  "Show Equal Highs / Lows",  group=GRP_LIQ)
+i_liq_eqh_col    = input.color(color.new(#EF9A9A, 0), "EQH Line Color",    group=GRP_LIQ)
+i_liq_eql_col    = input.color(color.new(#90CAF9, 0), "EQL Line Color",    group=GRP_LIQ)
+i_liq_sweep_show = input.bool(true,  "Show Liquidity Sweeps",     group=GRP_LIQ)
+i_liq_sweep_col  = input.color(color.new(#FF1744, 0), "Sweep Label Color", group=GRP_LIQ)
+i_liq_lookback   = input.int(3, "EQH/EQL Tolerance (ticks)", minval=1, maxval=10, group=GRP_LIQ)
+
+// Market Structure
+i_ms_show     = input.bool(true, "Show MSS / ChoCH",           group=GRP_MS)
+i_mss_col     = input.color(color.new(#AB47BC, 0), "MSS Color",   group=GRP_MS)
+i_choch_col   = input.color(color.new(#26C6DA, 0), "ChoCH Color", group=GRP_MS)
+i_ms_lookback = input.int(10, "Structure Lookback", minval=3, maxval=50, group=GRP_MS)
+
+// CISD
+i_cisd_show = input.bool(true,  "Show CISD",                    group=GRP_CISD)
+i_cisd_col  = input.color(color.new(#FFF176, 80), "CISD BG Color", group=GRP_CISD)
+
+// FVG / IFVG
+i_fvg_show      = input.bool(true,  "Show Fair Value Gaps",       group=GRP_FVG)
+i_fvg_bull_col  = input.color(color.new(#A5D6A7, 75), "Bullish FVG Color",  group=GRP_FVG)
+i_fvg_bear_col  = input.color(color.new(#EF9A9A, 75), "Bearish FVG Color",  group=GRP_FVG)
+i_ifvg_show     = input.bool(true,  "Show Inversion FVGs",        group=GRP_FVG)
+i_ifvg_bull_col = input.color(color.new(#80DEEA, 75), "Bullish IFVG Color", group=GRP_FVG)
+i_ifvg_bear_col = input.color(color.new(#FFCC80, 75), "Bearish IFVG Color", group=GRP_FVG)
+i_fvg_extend    = input.int(20, "Extend Bars (0 = off)", minval=0, maxval=200, group=GRP_FVG)
+
+// Dashboard
+i_dash_show     = input.bool(true, "Show Dashboard",              group=GRP_DASH)
+i_bias_lookback = input.int(12, "Bias Window (hours)", minval=1, maxval=48, group=GRP_DASH)
+
+// =============================================================================
+// ─── PURE HELPER FUNCTIONS ───────────────────────────────────────────────────
+// These functions are read-only (no global state modification) and may be
+// called freely from anywhere in the script.
+// =============================================================================
+
+// Inline max / min to avoid repeated math.max/min overhead
+f_max(a, b) => a > b ? a : b
+f_min(a, b) => a < b ? a : b
+
+// Draw a filled box; extend=extend.right when ext > 0
+f_draw_box(top, btm, left_bar, col, border_col, ext) =>
+    box.new(left_bar, top, bar_index + ext, btm,
+            border_color=border_col, border_width=1,
+            bgcolor=col, extend=ext > 0 ? extend.right : extend.none)
+
+// =============================================================================
+// ─── GLOBAL STATE (var) ──────────────────────────────────────────────────────
+// Declared once, mutated inline (never inside a user-defined function).
+// =============================================================================
+
+// --- Order Blocks ---
+var box[] ob_boxes = array.new<box>()
+
+// --- Breaker Blocks ---
+var box[] bb_boxes = array.new<box>()
+
+// --- Mitigation Blocks ---
+var box[] mb_boxes = array.new<box>()
+
+// --- FVG / IFVG ---
+var box[]   fvg_boxes  = array.new<box>()
+var box[]   ifvg_boxes = array.new<box>()
+var float[] fvg_tops   = array.new_float()
+var float[] fvg_btms   = array.new_float()
+var bool[]  fvg_is_bull = array.new_bool()
+var int[]   fvg_bars   = array.new_int()
+
+// --- Liquidity ---
+var line[]  eqh_lines   = array.new<line>()
+var line[]  eql_lines   = array.new<line>()
+var float   prev_ph     = na
+var int     prev_ph_bar = na
+var float   prev_pl     = na
+var int     prev_pl_bar = na
+
+// --- Market Structure ---
+var float  ms_last_ph     = na
+var int    ms_last_ph_bar = na
+var float  ms_last_pl     = na
+var int    ms_last_pl_bar = na
+var bool   ms_trend_bull  = na
+
+// --- CISD ---
+var int   cisd_consec_inside = 0
+var float cisd_range_high    = na
+var float cisd_range_low     = na
+
+// =============================================================================
+// ─── ORDER BLOCKS ─────────────────────────────────────────────────────────────
+// An Order Block is the last up/down candle before a strong opposing move.
+// Detected at pivot swing highs (bearish OB) and swing lows (bullish OB).
+// =============================================================================
+
+if i_ob_show
+    ph_ob = ta.pivothigh(high, i_ob_lookback, i_ob_lookback)
+    pl_ob = ta.pivotlow(low,  i_ob_lookback, i_ob_lookback)
+
+    // Bearish OB: candle at the swing high
+    if not na(ph_ob)
+        b = f_draw_box(high[i_ob_lookback], low[i_ob_lookback],
+                       bar_index - i_ob_lookback,
+                       i_ob_bear_col, i_ob_border_col, i_ob_extend)
+        array.push(ob_boxes, b)
+
+    // Bullish OB: candle at the swing low
+    if not na(pl_ob)
+        b = f_draw_box(high[i_ob_lookback], low[i_ob_lookback],
+                       bar_index - i_ob_lookback,
+                       i_ob_bull_col, i_ob_border_col, i_ob_extend)
+        array.push(ob_boxes, b)
+
+    if array.size(ob_boxes) > 20
+        box.delete(array.shift(ob_boxes))
+
+// =============================================================================
+// ─── BREAKER BLOCKS ───────────────────────────────────────────────────────────
+// A Breaker Block is a former OB whose level price has closed through,
+// flipping polarity: bullish OB -> bearish breaker, bearish OB -> bullish breaker.
+// =============================================================================
+
+if i_bb_show
+    ph_bb = ta.pivothigh(high, i_ob_lookback, i_ob_lookback)
+    pl_bb = ta.pivotlow(low,  i_ob_lookback, i_ob_lookback)
+    bb_top = high[i_ob_lookback]
+    bb_btm = low[i_ob_lookback]
+    bb_bar = bar_index - i_ob_lookback
+
+    // Bearish Breaker: swing low broken, prior candle acts as resistance
+    if not na(pl_bb) and close < bb_btm
+        b = f_draw_box(bb_top, bb_btm, bb_bar, i_bb_bear_col, i_ob_border_col, i_ob_extend)
+        array.push(bb_boxes, b)
+
+    // Bullish Breaker: swing high broken, prior candle acts as support
+    if not na(ph_bb) and close > bb_top
+        b = f_draw_box(bb_top, bb_btm, bb_bar, i_bb_bull_col, i_ob_border_col, i_ob_extend)
+        array.push(bb_boxes, b)
+
+    if array.size(bb_boxes) > 20
+        box.delete(array.shift(bb_boxes))
+
+// =============================================================================
+// ─── MITIGATION BLOCKS ────────────────────────────────────────────────────────
+// Mitigation Blocks are candles forming a three-bar imbalance pattern.
+// They represent areas where price is likely to return and be mitigated.
+// =============================================================================
+
+if i_mb_show
+    // Bullish mitigation: gap between candle[2] low and candle[0] high; middle = down candle
+    bull_mit = low[2] > high[0] and close[1] < open[1]
+    // Bearish mitigation: gap between candle[2] high and candle[0] low; middle = up candle
+    bear_mit = high[2] < low[0] and close[1] > open[1]
+
+    if bull_mit
+        b = f_draw_box(high[1], low[1], bar_index - 1, i_mb_bull_col, i_ob_border_col, i_ob_extend)
+        array.push(mb_boxes, b)
+
+    if bear_mit
+        b = f_draw_box(high[1], low[1], bar_index - 1, i_mb_bear_col, i_ob_border_col, i_ob_extend)
+        array.push(mb_boxes, b)
+
+    if array.size(mb_boxes) > 20
+        box.delete(array.shift(mb_boxes))
+
+// =============================================================================
+// ─── FAIR VALUE GAPS (FVG) & INVERSION FVGs (IFVG) ───────────────────────────
+// FVG: three-candle pattern with a price gap between candle[2] and candle[0].
+// IFVG: a tracked FVG that price has re-entered and closed through, inverting it.
+// =============================================================================
+
+if i_fvg_show or i_ifvg_show
+    bull_fvg = low[0] > high[2]   // gap above: bullish imbalance
+    bear_fvg = high[0] < low[2]   // gap below: bearish imbalance
+
+    if bull_fvg and i_fvg_show
+        fvg_top  = low[0]
+        fvg_btm  = high[2]
+        fvg_lbar = bar_index - 2
+        b = f_draw_box(fvg_top, fvg_btm, fvg_lbar, i_fvg_bull_col, color.new(#4CAF50, 50), i_fvg_extend)
+        array.push(fvg_boxes,   b)
+        array.push(fvg_tops,    fvg_top)
+        array.push(fvg_btms,    fvg_btm)
+        array.push(fvg_is_bull, true)
+        array.push(fvg_bars,    fvg_lbar)
+
+    if bear_fvg and i_fvg_show
+        fvg_top  = low[2]
+        fvg_btm  = high[0]
+        fvg_lbar = bar_index - 2
+        b = f_draw_box(fvg_top, fvg_btm, fvg_lbar, i_fvg_bear_col, color.new(#F44336, 50), i_fvg_extend)
+        array.push(fvg_boxes,   b)
+        array.push(fvg_tops,    fvg_top)
+        array.push(fvg_btms,    fvg_btm)
+        array.push(fvg_is_bull, false)
+        array.push(fvg_bars,    fvg_lbar)
+
+    // Inversion FVG: a prior FVG that price closed through, flipping its nature
+    if i_ifvg_show and array.size(fvg_tops) > 0
+        i_idx = array.size(fvg_tops) - 1
+        while i_idx >= 0
+            ft     = array.get(fvg_tops,    i_idx)
+            fb     = array.get(fvg_btms,    i_idx)
+            is_b   = array.get(fvg_is_bull, i_idx)
+            fb_bar = array.get(fvg_bars,    i_idx)
+
+            // Bullish FVG inverted: close drops below the gap bottom
+            if is_b and close < fb
+                b = f_draw_box(ft, fb, fb_bar, i_ifvg_bear_col, color.new(#FF9800, 40), i_fvg_extend)
+                array.push(ifvg_boxes, b)
+                array.remove(fvg_tops,    i_idx)
+                array.remove(fvg_btms,    i_idx)
+                array.remove(fvg_is_bull, i_idx)
+                array.remove(fvg_bars,    i_idx)
+
+            // Bearish FVG inverted: close rises above the gap top
+            else if not is_b and close > ft
+                b = f_draw_box(ft, fb, fb_bar, i_ifvg_bull_col, color.new(#00BCD4, 40), i_fvg_extend)
+                array.push(ifvg_boxes, b)
+                array.remove(fvg_tops,    i_idx)
+                array.remove(fvg_btms,    i_idx)
+                array.remove(fvg_is_bull, i_idx)
+                array.remove(fvg_bars,    i_idx)
+
+            i_idx -= 1
+
+    // Housekeeping: cap object counts
+    if array.size(fvg_boxes) > 30
+        box.delete(array.shift(fvg_boxes))
+    if array.size(ifvg_boxes) > 30
+        box.delete(array.shift(ifvg_boxes))
+    if array.size(fvg_tops) > 30
+        array.shift(fvg_tops)
+        array.shift(fvg_btms)
+        array.shift(fvg_is_bull)
+        array.shift(fvg_bars)
+
+// =============================================================================
+// ─── LIQUIDITY — EQUAL HIGHS / EQUAL LOWS ─────────────────────────────────────
+// Equal Highs (EQH): two swing highs at approximately the same price level.
+// Equal Lows (EQL): two swing lows at approximately the same price level.
+// A liquidity sweep is flagged when price spikes through EQH/EQL then closes back.
+//
+// NOTE: prev_ph / prev_pl are global var scalars and are updated INLINE here,
+// not inside any function, to comply with Pine Script v5 scoping rules.
+// =============================================================================
+
+if i_liq_show
+    liq_tick = syminfo.mintick * i_liq_lookback
+    ph_liq = ta.pivothigh(high, i_ob_lookback, i_ob_lookback)
+    pl_liq = ta.pivotlow(low,  i_ob_lookback, i_ob_lookback)
+
+    if not na(ph_liq)
+        ph_price = ph_liq
+        ph_bar   = bar_index - i_ob_lookback
+
+        if not na(prev_ph) and math.abs(ph_price - prev_ph) <= liq_tick
+            // Draw the EQH dashed line between the two equal highs
+            ln = line.new(prev_ph_bar, prev_ph, ph_bar, ph_price,
+                          color=i_liq_eqh_col, width=2, style=line.style_dashed,
+                          extend=extend.right)
+            array.push(eqh_lines, ln)
+            if array.size(eqh_lines) > 20
+                line.delete(array.shift(eqh_lines))
+
+            // Sweep: price spiked above EQH (buy-side liquidity) but closed back below it
+            if i_liq_sweep_show and high > ph_price and close < ph_price
+                label.new(bar_index, high, text="BSL Sweep",
+                          style=label.style_label_down,
+                          color=i_liq_sweep_col, textcolor=color.white, size=size.small)
+
+        prev_ph     := ph_price
+        prev_ph_bar := ph_bar
+
+    if not na(pl_liq)
+        pl_price = pl_liq
+        pl_bar   = bar_index - i_ob_lookback
+
+        if not na(prev_pl) and math.abs(pl_price - prev_pl) <= liq_tick
+            // Draw the EQL dashed line between the two equal lows
+            ln = line.new(prev_pl_bar, prev_pl, pl_bar, pl_price,
+                          color=i_liq_eql_col, width=2, style=line.style_dashed,
+                          extend=extend.right)
+            array.push(eql_lines, ln)
+            if array.size(eql_lines) > 20
+                line.delete(array.shift(eql_lines))
+
+            // Sweep: price spiked below EQL (sell-side liquidity) but closed back above it
+            if i_liq_sweep_show and low < pl_price and close > pl_price
+                label.new(bar_index, low, text="SSL Sweep",
+                          style=label.style_label_up,
+                          color=i_liq_sweep_col, textcolor=color.white, size=size.small)
+
+        prev_pl     := pl_price
+        prev_pl_bar := pl_bar
+
+// =============================================================================
+// ─── MARKET STRUCTURE: MSS & ChoCH ───────────────────────────────────────────
+// MSS  (Market Structure Shift): impulsive close beyond a significant swing.
+// ChoCH (Change of Character): first corrective close beyond a swing level,
+//        signaling a potential reversal before full structural confirmation.
+//
+// Impulsive candle: candle body covers > 60% of the total high-low range.
+//
+// NOTE: ms_last_* and ms_trend_bull are updated INLINE to comply with Pine v5.
+// =============================================================================
+
+if i_ms_show
+    ph_ms = ta.pivothigh(high, i_ms_lookback, i_ms_lookback)
+    pl_ms = ta.pivotlow(low,  i_ms_lookback, i_ms_lookback)
+
+    if not na(ph_ms)
+        ms_last_ph     := ph_ms
+        ms_last_ph_bar := bar_index - i_ms_lookback
+
+    if not na(pl_ms)
+        ms_last_pl     := pl_ms
+        ms_last_pl_bar := bar_index - i_ms_lookback
+
+    body_size   = math.abs(close - open)
+    candle_size = high - low
+    impulsive   = candle_size > 0 and body_size / candle_size > 0.6
+
+    // Bullish structural break: close above the last pivot high
+    if not na(ms_last_ph) and close > ms_last_ph and close[1] <= ms_last_ph
+        lbl_text = impulsive ? "MSS" : "ChoCH"
+        lbl_col  = impulsive ? i_mss_col : i_choch_col
+        label.new(bar_index, low, text=lbl_text, style=label.style_label_up,
+                  color=lbl_col, textcolor=color.white, size=size.small)
+        line.new(ms_last_ph_bar, ms_last_ph, bar_index, ms_last_ph,
+                 color=lbl_col, width=1, style=line.style_dotted)
+        ms_trend_bull := true
+
+    // Bearish structural break: close below the last pivot low
+    if not na(ms_last_pl) and close < ms_last_pl and close[1] >= ms_last_pl
+        lbl_text = impulsive ? "MSS" : "ChoCH"
+        lbl_col  = impulsive ? i_mss_col : i_choch_col
+        label.new(bar_index, high, text=lbl_text, style=label.style_label_down,
+                  color=lbl_col, textcolor=color.white, size=size.small)
+        line.new(ms_last_pl_bar, ms_last_pl, bar_index, ms_last_pl,
+                 color=lbl_col, width=1, style=line.style_dotted)
+        ms_trend_bull := false
+
+// =============================================================================
+// ─── CISD — CHANGE IN STATE OF DELIVERY ──────────────────────────────────────
+// CISD marks the candle that breaks out of a consolidation range after at
+// least two consecutive inside bars, signaling a shift from accumulation /
+// distribution to expansion.
+//
+// NOTE: cisd_* vars are updated INLINE; bgcolor() called in main body.
+// =============================================================================
+
+cisd_bg_col = color(na)  // will be set to i_cisd_col only on the breakout candle
+
+if i_cisd_show
+    is_inside = high <= high[1] and low >= low[1]
+
+    if is_inside
+        cisd_consec_inside += 1
+        if na(cisd_range_high)
+            cisd_range_high := high[1]
+            cisd_range_low  := low[1]
+        else
+            cisd_range_high := f_max(cisd_range_high, high[1])
+            cisd_range_low  := f_min(cisd_range_low,  low[1])
+    else
+        if cisd_consec_inside >= 2 and not na(cisd_range_high)
+            bull_break = close > cisd_range_high and close[1] <= cisd_range_high
+            bear_break = close < cisd_range_low  and close[1] >= cisd_range_low
+
+            if bull_break or bear_break
+                lbl_txt = bull_break ? "CISD Bull" : "CISD Bear"
+                lbl_y   = bull_break ? low : high
+                lbl_sty = bull_break ? label.style_label_up : label.style_label_down
+                label.new(bar_index, lbl_y, text=lbl_txt, style=lbl_sty,
+                          color=i_cisd_col, textcolor=color.gray, size=size.small)
+                cisd_bg_col := i_cisd_col  // signal bgcolor for this bar
+
+        cisd_consec_inside := 0
+        cisd_range_high    := na
+        cisd_range_low     := na
+
+// bgcolor must be called in the main body (not inside a function)
+bgcolor(cisd_bg_col, title="CISD Background")
+
+// =============================================================================
+// ─── MARKET BIAS CALCULATION ─────────────────────────────────────────────────
+// Computed each bar from three factors (weights in parentheses):
+//   1. Market structure direction — ms_trend_bull         (weight ±2)
+//   2. Price position vs. mid of recent range             (weight ±1)
+//   3. Presence of a fresh FVG on the current bar         (weight ±1)
+// Result >= 2 → Bullish, <= -2 → Bearish, else Neutral.
+//
+// f_compute_bias is a PURE function (reads globals, returns values, no writes).
+// =============================================================================
+
+f_compute_bias(trend_bull, bias_lb) =>
+    ms_score    = na(trend_bull) ? 0 : trend_bull ? 2 : -2
+
+    lb_bars      = bias_lb * 60
+    range_hi     = ta.highest(high, math.max(lb_bars, 1))
+    range_lo     = ta.lowest(low,  math.max(lb_bars, 1))
+    mid          = (range_hi + range_lo) / 2.0
+    price_score  = close > mid ? 1 : close < mid ? -1 : 0
+
+    bull_fvg_now = low[0] > high[2]
+    bear_fvg_now = high[0] < low[2]
+    fvg_score    = bull_fvg_now ? 1 : bear_fvg_now ? -1 : 0
+
+    total     = ms_score + price_score + fvg_score
+    bias_str  = total >= 2 ? "Bullish" : total <= -2 ? "Bearish" : "Neutral"
+    bias_col  = total >= 2 ? color.new(#4CAF50, 0) :
+                total <= -2 ? color.new(#F44336, 0) : color.new(#9E9E9E, 0)
+    [bias_str, bias_col]
+
+[bias_text, bias_color] = f_compute_bias(ms_trend_bull, i_bias_lookback)
+
+// =============================================================================
+// ─── DASHBOARD ────────────────────────────────────────────────────────────────
+// Compact info table in the top-right corner showing market bias and context.
+// =============================================================================
+
+var table dash_table = na
+
+if i_dash_show and barstate.islast
+    if not na(dash_table)
+        table.delete(dash_table)
+
+    dash_table := table.new(position.top_right, 2, 5,
+                             bgcolor=color.new(#1E1E2E, 10),
+                             border_color=color.new(#444466, 60),
+                             border_width=1,
+                             frame_color=color.new(#444466, 40),
+                             frame_width=1)
+
+    // Row 0 — header
+    table.cell(dash_table, 0, 0, "ICT Bias",
+               text_color=color.new(#E0E0E0, 0), text_size=size.normal,
+               bgcolor=color.new(#2A2A3E, 10), text_halign=text.align_left)
+    table.cell(dash_table, 1, 0, str.tostring(i_bias_lookback) + "h",
+               text_color=color.new(#AAAACC, 0), text_size=size.small,
+               bgcolor=color.new(#2A2A3E, 10), text_halign=text.align_right)
+
+    // Row 1 — Bias
+    table.cell(dash_table, 0, 1, "Bias",
+               text_color=color.new(#AAAACC, 0), text_size=size.small,
+               bgcolor=color.new(#252535, 10), text_halign=text.align_left)
+    table.cell(dash_table, 1, 1, bias_text,
+               text_color=bias_color, text_size=size.small,
+               bgcolor=color.new(#252535, 10), text_halign=text.align_right)
+
+    // Row 2 — Structure
+    ms_str = na(ms_trend_bull)  ? "Unknown" :
+             ms_trend_bull      ? "Bullish"  : "Bearish"
+    ms_col = na(ms_trend_bull)  ? color.new(#9E9E9E, 0) :
+             ms_trend_bull      ? color.new(#4CAF50, 0)  : color.new(#F44336, 0)
+    table.cell(dash_table, 0, 2, "Structure",
+               text_color=color.new(#AAAACC, 0), text_size=size.small,
+               bgcolor=color.new(#252535, 10), text_halign=text.align_left)
+    table.cell(dash_table, 1, 2, ms_str,
+               text_color=ms_col, text_size=size.small,
+               bgcolor=color.new(#252535, 10), text_halign=text.align_right)
+
+    // Row 3 — FVG
+    fvg_present = low[0] > high[2] ? "Bullish FVG" :
+                  high[0] < low[2] ? "Bearish FVG" : "None"
+    fvg_dc      = low[0] > high[2] ? color.new(#4CAF50, 0) :
+                  high[0] < low[2] ? color.new(#F44336, 0)  : color.new(#9E9E9E, 0)
+    table.cell(dash_table, 0, 3, "FVG",
+               text_color=color.new(#AAAACC, 0), text_size=size.small,
+               bgcolor=color.new(#252535, 10), text_halign=text.align_left)
+    table.cell(dash_table, 1, 3, fvg_present,
+               text_color=fvg_dc, text_size=size.small,
+               bgcolor=color.new(#252535, 10), text_halign=text.align_right)
+
+    // Row 4 — Timeframe
+    table.cell(dash_table, 0, 4, "Timeframe",
+               text_color=color.new(#AAAACC, 0), text_size=size.small,
+               bgcolor=color.new(#252535, 10), text_halign=text.align_left)
+    table.cell(dash_table, 1, 4, timeframe.period,
+               text_color=color.new(#E0E0E0, 0), text_size=size.small,
+               bgcolor=color.new(#252535, 10), text_halign=text.align_right)
